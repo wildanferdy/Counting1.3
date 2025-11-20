@@ -59,7 +59,10 @@ class VehicleDetectorApp:
             "line1_y": (MAX_DISPLAY_HEIGHT // 2) - 25,
             "line1_x": (MAX_DISPLAY_WIDTH // 2) - 25,
             "video_playback_speed": 1.0,
-            "start_timestamp_user": None
+            "start_timestamp_user": None,
+            "model_path": os.environ.get("YOLO_MODEL_PATH"),
+            "processing_max_dimension": 960,
+            "inference_device": os.environ.get("YOLO_DEVICE"),
         }
         self.load_config()
         self.new_settings_to_send = None
@@ -109,6 +112,42 @@ class VehicleDetectorApp:
         except Exception as e:
             messagebox.showerror("Info", f"Error saving config: {e}")
 
+    def select_model_file(self):
+        """Allow user to pick an external YOLO model file when it's not bundled."""
+        path = filedialog.askopenfilename(filetypes=[("YOLO model", "*.pt *.pth"), ("All files", "*.*")])
+        if not path:
+            return
+        self.settings["model_path"] = path
+        self.save_config()
+        messagebox.showinfo("Model", f"Model path updated to:\n{path}\n\nMulai ulang deteksi untuk menerapkan perubahan.")
+
+    def ensure_model_path(self):
+        model_path = self.settings.get("model_path") or os.environ.get("YOLO_MODEL_PATH")
+        if model_path and os.path.exists(model_path):
+            return model_path
+
+        candidate = resource_path('models/best1.pt')
+        if os.path.exists(candidate):
+            self.settings["model_path"] = candidate
+            return candidate
+
+        # Prompt user to locate the model file when missing
+        if messagebox.askyesno(
+            "Model Missing",
+            "File model YOLO tidak ditemukan. Pilih file model (.pt) secara manual?",
+        ):
+            path = filedialog.askopenfilename(filetypes=[("YOLO model", "*.pt *.pth"), ("All files", "*.*")])
+            if path:
+                self.settings["model_path"] = path
+                self.save_config()
+                return path
+
+        messagebox.showerror(
+            "Model Error",
+            "Model YOLO belum tersedia. Simpan file .pt di perangkat atau set variabel YOLO_MODEL_PATH.",
+        )
+        return None
+
     def create_menu(self):
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
@@ -127,6 +166,7 @@ class VehicleDetectorApp:
         menubar.add_cascade(label="Settings", menu=file_conf)
         file_conf.add_command(label="Configuration", command=self.open_settings_dialog)
         file_conf.add_command(label="Time", command=self.open_time_dialog)
+        file_conf.add_command(label="Select Model File", command=self.select_model_file)
 
     def create_widgets(self):
         self.main_frame = ttk.Frame(self.root, padding="10")
@@ -439,6 +479,13 @@ class VehicleDetectorApp:
         if self.video_source is None:
             messagebox.showwarning("Warning", "Please load a video or select a webcam first.")
             return
+
+        model_path = self.ensure_model_path()
+        if not model_path:
+            return
+
+        # Persist resolved path for the detection subprocess
+        self.settings["model_path"] = model_path
 
         if self.running or self.is_loading:
             return
