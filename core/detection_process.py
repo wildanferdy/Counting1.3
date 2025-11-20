@@ -18,6 +18,20 @@ def resource_path(relative_path):
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
+
+def resolve_model_path(candidate: str | None) -> str | None:
+    """Resolve model path from settings/environment with sensible fallbacks."""
+    if candidate and os.path.exists(candidate):
+        return candidate
+
+    if candidate and not os.path.isabs(candidate):
+        packaged_path = resource_path(candidate)
+        if os.path.exists(packaged_path):
+            return packaged_path
+
+    default_path = resource_path('models/best1.pt')
+    return default_path if os.path.exists(default_path) else None
+
 def calculate_distance(pos1, pos2):
     """Hitung jarak euclidean antara dua posisi"""
     return math.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
@@ -276,12 +290,27 @@ def enhanced_detection_validation(results, settings, frame, model):
 def detection_process(frame_q: Queue, result_q: Queue, stop_event: Event, initial_settings: dict):
     print(f"Detection process started with PID: {os.getpid()}")
 
-    try:
-        model = YOLO(resource_path('models/best1.pt'))
-        result_q.put({"type": "model_ready"})
-    except Exception as e:
-        result_q.put({"type": "model_error", "error": str(e)})
+    model_path = resolve_model_path(initial_settings.get("model_path"))
+    if not model_path:
+        result_q.put({"type": "model_error", "error": "Model file not found. Set model_path via Settings or YOLO_MODEL_PATH."})
         return
+
+    try:
+        model = YOLO(model_path)
+        result_q.put({"type": "model_ready", "model_path": model_path})
+    except Exception as e:
+        fallback_error = str(e)
+        try:
+            print(f"[WARN] Failed to load model on default device: {e}. Retrying on CPU.")
+            model = YOLO(model_path)
+            model.to("cpu")
+            result_q.put({"type": "model_ready", "model_path": model_path})
+        except Exception as retry_err:
+            result_q.put({
+                "type": "model_error",
+                "error": f"Model load failed for {model_path}: {fallback_error} | CPU retry: {retry_err}"
+            })
+            return
 
     settings = initial_settings
     vehicle_states = {}
@@ -332,6 +361,16 @@ def detection_process(frame_q: Queue, result_q: Queue, stop_event: Event, initia
 
             (h_orig, w_orig) = frame.shape[:2]
 
+            processing_frame = frame
+            max_dim = settings.get("processing_max_dimension")
+            if max_dim and max_dim > 0:
+                larger_side = max(h_orig, w_orig)
+                if larger_side > max_dim:
+                    scale = max_dim / larger_side
+                    new_w, new_h = int(w_orig * scale), int(h_orig * scale)
+                    processing_frame = cv2.resize(frame, (new_w, new_h))
+                    h_orig, w_orig = processing_frame.shape[:2]
+
             # Hitung posisi garis deteksi
             line_offset_scaled = int(settings['line_offset'] * (h_orig / MAX_DISPLAY_HEIGHT))
             if settings['line_orientation'] == "Horizontal":
@@ -348,8 +387,14 @@ def detection_process(frame_q: Queue, result_q: Queue, stop_event: Event, initia
                 cv2.line(frame, (line2_pos, 0), (line2_pos, h_orig), (0, 0, 255), 2)
 
             # Jalankan deteksi YOLO
-            results = model.track(frame, persist=True, tracker="bytetrack.yaml", 
-                                conf=settings.get('confidence_threshold', 0.5), verbose=False)
+            results = model.track(
+                processing_frame,
+                persist=True,
+                tracker="bytetrack.yaml",
+                conf=settings.get('confidence_threshold', 0.5),
+                verbose=False,
+                device=settings.get("inference_device", None),
+            )
             annotated_frame = results[0].plot()
 
             # Enhanced validation untuk deteksi
